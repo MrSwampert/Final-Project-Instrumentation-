@@ -1,0 +1,132 @@
+// Code
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <ESP_Mail_Client.h>
+
+// ======== CONFIGURACIÓN WIFI Y CORREO ===========
+#define WIFI_SSID "Mondongo"
+#define WIFI_PASSWORD "huevos12"
+
+#define SMTP_HOST "smtp.gmail.com"
+#define SMTP_PORT 465
+
+#define AUTHOR_EMAIL "jaimicoperez769@gmail.com"
+#define AUTHOR_PASSWORD "aziovlmtkjibfdse"
+#define RECIPIENT_EMAIL "jaimicoperez769@gmail.com"
+
+// ========== CONFIGURACIÓN DE SENSORES ============
+#define SENSOR_PIN 34  // Pin del sensor YL-69
+#define VALOR_SECO 4000
+#define VALOR_HUMEDO 1200
+
+// ========== CONFIGURACIÓN RELÉ ====================
+#define RELAY_PIN 26  // Puedes cambiar al pin GPIO que estés usando
+#define RELAY_ACTIVO LOW  // LOW si el relé se activa en bajo (común)
+#define RELAY_INACTIVO HIGH
+
+// ========== PARÁMETROS DE CONTROL =================
+#define INTERVALO_ENVIO 600000  // 10 minutos
+#define UMBRAL_HUMEDAD 80.0
+
+// ========== VARIABLES DE ESTADO ===================
+SMTPSession smtp;
+unsigned long ultimoEnvio = 0;
+bool alertaActiva = false;
+
+// ========= FUNCIONES ==============================
+
+void smtpCallback(SMTP_Status status) {
+  Serial.println(status.info());
+  if (status.success()) {
+    Serial.println("✅ Correo enviado correctamente.");
+    smtp.sendingResult.clear();
+  } else {
+    Serial.println("🔋Preparando Envio Espere porfavor.");
+  }
+}
+
+void enviarCorreo(float humedad) {
+  Serial.println("⏩ Iniciando función enviarCorreo()");
+
+  Session_Config config;
+  config.server.host_name = SMTP_HOST;
+  config.server.port = SMTP_PORT;
+  config.login.email = AUTHOR_EMAIL;
+  config.login.password = AUTHOR_PASSWORD;
+  config.time.ntp_server = F("pool.ntp.org,time.nist.gov");
+  config.time.gmt_offset = 0;
+  config.time.day_light_offset = 0;
+
+  SMTP_Message message;
+  message.sender.name = F("ESP32");
+  message.sender.email = AUTHOR_EMAIL;
+  message.subject = F("⚠️ Alerta de Humedad Baja");
+  message.addRecipient(F("Destinatario"), RECIPIENT_EMAIL);
+
+  String cuerpo = "La humedad del suelo ha bajado a ";
+  cuerpo += String(humedad, 1);
+  cuerpo += " %. Se activó la motobomba para regar el suelo.";
+
+  message.text.content = cuerpo;
+  message.text.charSet = "us-ascii";
+  message.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
+
+  if (!smtp.connect(&config)) {
+    Serial.printf("❌ Error de conexión: %d, %s\n", smtp.statusCode(), smtp.errorReason().c_str());
+    return;
+  }
+
+  if (!MailClient.sendMail(&smtp, &message)) {
+    Serial.printf("❌ Error al enviar: %d, %s\n", smtp.statusCode(), smtp.errorReason().c_str());
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(SENSOR_PIN, INPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, RELAY_INACTIVO);  // Asegurarse que la bomba esté apagada al iniciar
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(300);
+  }
+  Serial.println("✅ WiFi conectado");
+
+  smtp.debug(1);
+  smtp.callback(smtpCallback);
+}
+
+void loop() {
+  int valorBruto = analogRead(SENSOR_PIN);
+  float humedad = map(valorBruto, VALOR_SECO, VALOR_HUMEDO, 0, 100);
+  humedad = constrain(humedad, 0, 100);
+
+  Serial.print("Humedad del suelo: ");
+  Serial.print(humedad);
+  Serial.println(" %");
+
+  unsigned long tiempoActual = millis();
+
+  if (humedad < UMBRAL_HUMEDAD) {
+    digitalWrite(RELAY_PIN, RELAY_ACTIVO);  // 🔴 Activar bomba
+    Serial.println("🚿 Motobomba ACTIVADA");
+
+    if (!alertaActiva || tiempoActual - ultimoEnvio >= INTERVALO_ENVIO) {
+      Serial.println("⚠️ ALERTA: Humedad baja. Enviando correo...");
+      enviarCorreo(humedad);
+      ultimoEnvio = tiempoActual;
+      alertaActiva = true;
+    } else {
+      Serial.println("⌛ Esperando 10 min antes del próximo envío...");
+    }
+  } else {
+    digitalWrite(RELAY_PIN, RELAY_INACTIVO);  // 🟢 Apagar bomba
+    alertaActiva = false;  // Resetea la alerta si la humedad sube
+    Serial.println("✅ Humedad normal. Motobomba apagada.");
+  }
+
+  delay(5000);  // Leer cada 5 segundos
+}
